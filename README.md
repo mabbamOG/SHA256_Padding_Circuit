@@ -45,6 +45,52 @@ for j in 0..=63:
     B = SELECT( 56<= j <=63 AND b.len < 56, len[j-56], 0)
 ```
 
+#### explanation
+
+In order to find this constraint it's necessary to consider all the possible block patterns we might be in at any current row, as well as their context (what block came before, or will come afterwards). The following is a collection of all the 6 possible patterns:
+
+1. "FULL": in this case the next (or even last) bytes of the message perfectly fit into a block of 64 bytes, which means that we just need to copy over all the bytes (this is the second to last block in the full padding)
+   ```Rust
+   block = input_block = input_block[0..=63]                IF b.len = 64 (AND b.len_prev = 64)
+   ```
+2. "KINDA FULL": in this case the last bytes of the message are less than a full block (64 bytes), but they are too many to fit the final padding bytes (minimum of 9 bytes) into this block (this is the second to last block in the full padding)
+   ```Rust
+   block = [input_block[0..=b.len-1], 128, 0*]              IF b.len = 56..=63 (AND b.len_prev = 64)
+   ```
+3. "FINISH KINDA EMPTY": in this case the last few bytes of the message are so few that they can be fitted into the next block along with ALL the final padding bytes (this is the last block in the full padding)
+   ```Rust
+   block = [input_block[0..=b.len-1], 128, 0*, len[0..=7]]  IF b.len = 1..=55 (AND b.len_prev = 64)
+   ```
+4. then "FINISH FULL": in this case we have 0 bytes left to read from the message, and the previous block was full, so we just have an empty padding block (this is the last block in the full padding)
+   ```Rust
+   block = [128, 0{55}, len[0..=7]]                         IF b.len = 0 AND b.len_prev = 64
+   ```
+5. then "FINISH KINDA FULL": in this case we have 0 bytes left to read from the message, and the previous block did manage to begin padding but could not complete it, so we just add an empty padding block without the bit marker (this is the last block in the full padding)
+   ```Rust
+   block = [0{56}, len[0..=7]]                              IF b.len = 0 AND b.len_prev = 56..=63
+   ```
+6. "FINISHED": in this final edge case all the padding has already been completed, we can just ignore what the next block is going to be since don't use it anymore (but the state constraint will need to ensure the state is copied over in this case)
+   ```Rust
+   block = ?                                                IF b.len = 0 AND (b.len_prev = 0 OR b.len_prev = 1..=55)
+   ```
+
+The approach I follow here is to identify common algebraic patterns of known fixed size (e.g. `input_block[0..=b.len-1]` or `128`), and try to squash them all with just one same conditional. The other conditionals are positioned strategically to try and push common algebraic patterns into one same conditional (e.g. `128` sometimes is the first byte and sometimes it comes after the input bytes, but in both cases it comes after the input bytes because when it's first there are no input bytes anyway), so that expressions do not repeat each other. Finally, annoying edge cases where we do not know the length of the common algebraic pattern (e.g. `0*`) are kept for last, since the final condition will fail and default to all remaining bytes no matter how many they are. In steps:
+1. first consider that when there are bytes to read from the input block we can just read them in
+   ```Rust
+   bj = SELECT(j < b.len, input_block[j], A)
+   ```
+   and the condition fails (`A`) either when we are in a situation where we have no input bytes, or when we have pushed the left (`j>=b.len`) index beyond the available input bytes
+2. note we have already taken care of the "FULL" case, so we can ignore it and focus on the others. consider that the first remaining index `j==b.len`  is now pointing to the `128` byte in all cases (which, coincidentally, share `b.len_prev=64`) except for the "FINISH KINDA FULL" case. let's take care of this byte:
+   ```Rust
+   A = SELECT(j==b.len AND b.len_prev==64, 128, B)
+   ```
+   and the condition fails (`B`) either when the index `j>b.len` is just after the `128` byte in all cases where it exists, or when we are pointing to the next block of `0` bytes in all cases, which is the same thing.
+3. now we need to take care of the remaining `0` bytes, but that is complex as we do not know how long they will be, so let us instead take care of the final (`j = (56..=63)`) fixed length `len[0..=7]` bytes, which exist for all cases except whenever we are in the "KINDA FULL" (`b.len = (56..=63)`) case:
+   ```Rust
+   B = SELECT(56<=j<=63 AND b.len<56, len[j-56], 0)
+
+
+
 ### CONSTRAINT bytes_read: 
 We are ensuring that we are tracking how many bytes we have read in total, up to the limit which is the full length. This is necessary to simplify the constraint for "b.len".
 
