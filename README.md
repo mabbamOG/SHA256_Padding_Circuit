@@ -51,27 +51,33 @@ In order to find this constraint it's necessary to consider all the possible blo
 
 1. "FULL": in this case the next (or even last) bytes of the message perfectly fit into a block of 64 bytes, which means that we just need to copy over all the bytes (this is the second to last block in the full padding)
    ```Rust
-   block = input_block = input_block[0..=63]                IF b.len = 64 (AND b.len_prev = 64)
+   IF b.len = 64 (AND b.len_prev = 64)
+      block = input_block = input_block[0..=63]               
    ```
 2. "KINDA FULL": in this case the last bytes of the message are less than a full block (64 bytes), but they are too many to fit the final padding bytes (minimum of 9 bytes) into this block (this is the second to last block in the full padding)
    ```Rust
-   block = [input_block[0..=b.len-1], 128, 0*]              IF b.len = 56..=63 (AND b.len_prev = 64)
+   IF b.len = 56..=63 (AND b.len_prev = 64)
+      block = [input_block[0..=b.len-1], 128, 0*]              
    ```
 3. "FINISH KINDA EMPTY": in this case the last few bytes of the message are so few that they can be fitted into the next block along with ALL the final padding bytes (this is the last block in the full padding)
    ```Rust
-   block = [input_block[0..=b.len-1], 128, 0*, len[0..=7]]  IF b.len = 1..=55 (AND b.len_prev = 64)
+   IF b.len = 1..=55 (AND b.len_prev = 64)
+      block = [input_block[0..=b.len-1], 128, 0*, len[0..=7]]  
    ```
 4. then "FINISH FULL": in this case we have 0 bytes left to read from the message, and the previous block was full, so we just have an empty padding block (this is the last block in the full padding)
    ```Rust
-   block = [128, 0{55}, len[0..=7]]                         IF b.len = 0 AND b.len_prev = 64
+   IF b.len = 0 AND b.len_prev = 64
+      block = [128, 0{55}, len[0..=7]]                         
    ```
 5. then "FINISH KINDA FULL": in this case we have 0 bytes left to read from the message, and the previous block did manage to begin padding but could not complete it, so we just add an empty padding block without the bit marker (this is the last block in the full padding)
    ```Rust
-   block = [0{56}, len[0..=7]]                              IF b.len = 0 AND b.len_prev = 56..=63
+   IF b.len = 0 AND b.len_prev = 56..=63
+      block = [0{56}, len[0..=7]]                              
    ```
 6. "FINISHED": in this final edge case all the padding has already been completed, we can just ignore what the next block is going to be since don't use it anymore (but the state constraint will need to ensure the state is copied over in this case)
    ```Rust
-   block = ?                                                IF b.len = 0 AND (b.len_prev = 0 OR b.len_prev = 1..=55)
+   IF b.len = 0 AND (b.len_prev = 0 OR b.len_prev = 1..=55)
+      block = ?                                                
    ```
 
 The approach I follow here is to identify common algebraic patterns of known fixed size (e.g. `input_block[0..=b.len-1]` or `128`), and try to squash them all with just one same conditional. The other conditionals are positioned strategically to try and push common algebraic patterns into one same conditional (e.g. `128` sometimes is the first byte and sometimes it comes after the input bytes, but in both cases it comes after the input bytes because when it's first there are no input bytes anyway), so that expressions do not repeat each other. Finally, annoying edge cases where we do not know the length of the common algebraic pattern (e.g. `0*`) are kept for last, since the final condition will fail and default to all remaining bytes no matter how many they are. In steps:
